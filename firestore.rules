@@ -1,0 +1,113 @@
+/**
+ * Core Philosophy: This ruleset enforces a strict user-ownership model for all personal data, ensuring absolute privacy. A user can only access their own profile and related subcollections. A separate global collection for recipes is made publicly readable to facilitate browsing and discovery.
+ *
+ * Data Structure:
+ * - /users/{userId}: Private root document for each user's profile and settings.
+ * - /users/{userId}/recipeHistory/{recipeHistoryId}: Private subcollection for a user's generated recipes.
+ * - /users/{userId}/favoriteRecipes/{favoriteRecipeId}: Private subcollection for a user's favorited recipes.
+ * - /recipes/{recipeId}: A top-level collection of global recipes, readable by all.
+ *
+ * Key Security Decisions:
+ * - User Data Privacy: All paths under `/users/{userId}` are strictly controlled, allowing access only when the requester's UID matches the `{userId}` in the path.
+ * - No User Listing: It is not possible to query or list the `/users` collection, preventing enumeration of all application users.
+ * - Public Read-Only Collection: The `/recipes` collection is publicly readable to anyone, including unauthenticated users, but all write operations are disabled. This is a secure default because the 'Recipe' entity lacks an ownership field (e.g., 'authorId'), making it impossible to safely authorize writes.
+ * - Relational Integrity: On creation, documents must contain an 'id' field that matches the document's ID in the path to ensure data consistency. This 'id' field is immutable on update.
+ *
+ * Denormalization for Authorization:
+ * This ruleset relies on path-based security. By nesting user-specific data like 'recipeHistory' under `/users/{userId}`, the ownership context is denormalized directly into the document path. This avoids slow and costly `get()` calls in rules, resulting in a highly performant and secure model.
+ *
+ * Structural Segregation:
+ * The separation between private user data (`/users/{userId}/...`) and public data (`/recipes/{recipeId}`) is a core design choice. This clear segregation allows for simple, powerful rules and prevents accidental data exposure. Queries for public recipes are efficient and don't risk leaking private user information.
+ */
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions to promote readable, secure, and maintainable rules.
+
+    /**
+     * Checks if a user is authenticated.
+     */
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    /**
+     * Checks if the authenticated user's UID matches the provided userId.
+     * This is the primary function for enforcing data ownership.
+     */
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    /**
+     * Checks for ownership on an existing document.
+     * CRITICAL: Used for all update and delete operations to prevent modifying
+     * or deleting non-existent data.
+     */
+    function isExistingOwner(userId) {
+      return isOwner(userId) && resource != null;
+    }
+
+    /**
+     * @description Rules for a user's private profile document.
+     * @path /users/{userId}
+     * @allow (create) A new user creating their own profile document.
+     * @deny (create) An authenticated user trying to create a profile for someone else.
+     * @principle Restricts access to a user's own data tree and enforces self-creation.
+     */
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow list: if false; // Explicitly deny listing all users for security.
+      allow create: if isOwner(userId) && request.resource.data.id == userId;
+      allow update: if isExistingOwner(userId) && request.resource.data.id == resource.data.id;
+      allow delete: if isExistingOwner(userId);
+    }
+
+    /**
+     * @description Rules for a user's private recipe history subcollection.
+     * @path /users/{userId}/recipeHistory/{recipeHistoryId}
+     * @allow (create) A user adding a new recipe to their own history.
+     * @deny (get) A user trying to read another user's recipe history.
+     * @principle Enforces document ownership within a user-specific subcollection.
+     */
+    match /users/{userId}/recipeHistory/{recipeHistoryId} {
+      allow get: if isOwner(userId);
+      allow list: if isOwner(userId);
+      allow create: if isOwner(userId) && request.resource.data.id == recipeHistoryId;
+      allow update: if isExistingOwner(userId) && request.resource.data.id == resource.data.id;
+      allow delete: if isExistingOwner(userId);
+    }
+
+    /**
+     * @description Rules for a user's private favorite recipes subcollection.
+     * @path /users/{userId}/favoriteRecipes/{favoriteRecipeId}
+     * @allow (delete) A user removing a recipe from their own favorites.
+     * @deny (list) A user trying to list another user's favorite recipes.
+     * @principle Enforces document ownership within a user-specific subcollection.
+     */
+    match /users/{userId}/favoriteRecipes/{favoriteRecipeId} {
+      allow get: if isOwner(userId);
+      allow list: if isOwner(userId);
+      allow create: if isOwner(userId) && request.resource.data.id == favoriteRecipeId;
+      allow update: if isExistingOwner(userId) && request.resource.data.id == resource.data.id;
+      allow delete: if isExistingOwner(userId);
+    }
+
+    /**
+     * @description Rules for the global, publicly readable collection of recipes.
+     * @path /recipes/{recipeId}
+     * @allow (get, list) Any user, including unauthenticated ones, browsing recipes.
+     * @deny (create, update, delete) Any user trying to modify the global recipe list.
+     * @principle Provides public read access while preventing unauthorized modification. Writes are disabled due to a missing ownership field in the schema.
+     */
+    match /recipes/{recipeId} {
+      allow get: if true;
+      allow list: if true;
+      // CRITICAL: Cannot implement owner-only writes. The 'Recipe' entity is missing an 'ownerId' or 'authorId' field.
+      allow create: if false; // TODO: Add owner validation once the schema is updated with an ownership field.
+      allow update: if false; // TODO: Add owner validation once the schema is updated with an ownership field.
+      allow delete: if false; // TODO: Add owner validation once the schema is updated with an ownership field.
+    }
+  }
+}
