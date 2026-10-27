@@ -19,4 +19,4 @@ To get started with the development server, run:
 npm run dev
 ```
 
-This will start the Next.js application on `http://localhost:9002`.
+This will start the Next.js application on `https://instantr.vercel.app`.
